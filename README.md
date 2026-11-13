@@ -33,3 +33,13 @@ npm run lint
 npm run typecheck
 npm run build
 ```
+
+### Supabase につないで閲覧を確認する
+
+専用の開発用プロジェクトに試作用マイグレーションを適用します。Dashboard の Authentication で `reader-a@example.test` と `reader-b@example.test` を確認済みユーザーとして作り、本人だけが知る別々のパスワードを設定します。続いて SQL Editor で [閲覧確認用データ](supabase/dev/reader-fixtures.sql) を一度だけ実行します。通常の `seed.sql` はローカル試作用です。
+
+`.env.local` に Project URL と publishable key を設定して開発サーバーを再起動します。両方が空の場合は架空アカウントの画面プレビューを表示します。
+
+1. A でログインし、「週末の交換日記」から「久しぶりに本を一冊読み終えた。」を開く。参加前の投稿と下書きは一覧に表示されない。
+2. ログアウトして B でログインし、「放課後の交換日記」だけが表示されることを確認する。
+3. B の状態で A の本文URLを開き、「日記を開けません」と表示されることを確認する。ログアウト後は同じURLでログイン画面が出る。

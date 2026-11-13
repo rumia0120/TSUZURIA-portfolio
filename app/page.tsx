@@ -1,8 +1,11 @@
-export default function Home() {
-  return (
-    <main className="mx-auto max-w-xl px-6 py-16">
-      <h1 className="text-3xl font-semibold">TSUZURIA</h1>
-      <p className="mt-4">友達と一冊の日記を順番に回し、自分のペースで日常を伝え合う。</p>
-    </main>
-  );
+import DiaryPreview from "./diary-preview";
+import DiaryReader from "./diary-reader";
+
+export default async function Home({ searchParams }: PageProps<"/">) {
+  if (!process.env.NEXT_PUBLIC_SUPABASE_URL || !process.env.NEXT_PUBLIC_SUPABASE_PUBLISHABLE_KEY) {
+    return <DiaryPreview />;
+  }
+  const params = await searchParams;
+  return <DiaryReader groupId={typeof params.group === "string" ? params.group : undefined}
+    entryId={typeof params.entry === "string" ? params.entry : undefined} />;
 }
