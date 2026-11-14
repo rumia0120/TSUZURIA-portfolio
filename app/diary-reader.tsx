@@ -13,7 +13,7 @@ type Entry = { id: string; body: string; shared_at: string };
 type View =
   | { kind: "groups"; groups: Group[] }
   | { kind: "entries"; group: Group; entries: Entry[]; turn: Turn }
-  | { kind: "write"; group: Group }
+  | { kind: "write"; group: Group; draftBody: string }
   | { kind: "entry"; group: Group; entry: Entry }
   | { kind: "missing" };
 
@@ -38,7 +38,14 @@ async function loadView(client: SupabaseClient, { groupId, entryId, writing }: S
   const turn = entryId ? null : await client.rpc("read_diary_turn", { target_group: groupId }).maybeSingle<Turn>();
   if (turn?.error) throw turn.error;
   if (!entryId && !turn?.data) return { kind: "missing" };
-  if (writing) return turn?.data?.is_my_turn ? { kind: "write", group: group.data } : { kind: "missing" };
+  if (writing) {
+    if (!turn?.data?.is_my_turn) return { kind: "missing" };
+    // RLS limits draft reads to the signed-in author.
+    const { data, error } = await client.from("diary_entries").select("body")
+      .eq("group_id", groupId).is("shared_at", null).maybeSingle();
+    if (error) throw error;
+    return { kind: "write", group: group.data, draftBody: data?.body ?? "" };
+  }
 
   // RLS checks the signed-in reader's membership and when the entry was shared.
   const shared = client.from("diary_entries").select("id, body, shared_at")
@@ -92,6 +99,72 @@ function Login({ client }: { client: SupabaseClient }) {
   );
 }
 
+function DiaryDraft({ client, group, initialBody }: { client: SupabaseClient; group: Group; initialBody: string }) {
+  const [body, setBody] = useState(initialBody);
+  const [status, setStatus] = useState<"idle" | "saving" | "saved">("idle");
+  const [errorMessage, setErrorMessage] = useState("");
+  const saveFailure = "下書きを保存できませんでした。もう一度お試しください。";
+
+  async function saveDraft(event: FormEvent<HTMLFormElement>) {
+    event.preventDefault();
+    if (status === "saving" || !body.trim()) return;
+
+    setStatus("saving");
+    setErrorMessage("");
+    try {
+      const { error } = await client.rpc("save_diary_draft", {
+        target_group: group.id,
+        draft_body: body,
+      });
+      if (error) {
+        setErrorMessage(error.code === "42501"
+          ? "下書きを保存できませんでした。日記一覧で今の番を確認してください。"
+          : saveFailure);
+        setStatus("idle");
+      } else {
+        setStatus("saved");
+      }
+    } catch {
+      setErrorMessage(saveFailure);
+      setStatus("idle");
+    }
+  }
+
+  return (
+    <>
+      <Link className="back-link" href={`/?group=${group.id}`}>← 日記一覧</Link>
+      <article className="paper">
+        <p className="paper-label">{group.name}</p>
+        <h1>日記を書く</h1>
+        <form onSubmit={saveDraft}>
+          <label className="write-label" htmlFor="diary-body">本文</label>
+          <textarea
+            id="diary-body"
+            className="paper-body write-body"
+            rows={6}
+            aria-describedby="write-note"
+            value={body}
+            readOnly={status === "saving"}
+            onChange={(event) => {
+              setBody(event.target.value);
+              setErrorMessage("");
+              setStatus("idle");
+            }}
+          />
+          <p id="write-note" className="muted">下書きは自分だけが読めます。</p>
+          <div className="draft-actions">
+            <button className="write-link" type="submit" disabled={status === "saving" || !body.trim()}>
+              {status === "saving" ? "保存中…" : "下書きを保存"}
+            </button>
+            <p className="muted" role="status">{status === "saved" ? "下書きを保存しました。" : ""}</p>
+          </div>
+          {errorMessage && <p className="draft-error" role="alert">{errorMessage}</p>}
+        </form>
+      </article>
+    </>
+  );
+}
+
 function DiaryContent({ client, groupId, entryId, writing }: Selection & { client: SupabaseClient }) {
   const [view, setView] = useState<View | null>(null);
   const [failed, setFailed] = useState(false);
@@ -127,18 +200,9 @@ function DiaryContent({ client, groupId, entryId, writing }: Selection & { clien
   );
 
   const groupLink = `/?group=${view.group.id}`;
-  if (view.kind === "write") return (
-    <>
-      <Link className="back-link" href={groupLink}>← 日記一覧</Link>
-      <article className="paper">
-        <p className="paper-label">{view.group.name}</p>
-        <h1>日記を書く</h1>
-        <label className="write-label" htmlFor="diary-body">本文</label>
-        <textarea id="diary-body" className="paper-body write-body" rows={6} aria-describedby="write-note" />
-        <p id="write-note" className="muted">ここでは入力を試せます。保存は次の工程です。</p>
-      </article>
-    </>
-  );
+  if (view.kind === "write") {
+    return <DiaryDraft client={client} group={view.group} initialBody={view.draftBody} />;
+  }
   if (view.kind === "entries") return (
     <>
       <Link className="back-link" href="/">← マイグループ</Link>

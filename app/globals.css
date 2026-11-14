@@ -139,3 +139,7 @@ h1:focus { outline: none; }
 .write-label { display: block; color: var(--muted); margin-top: 20px; }
 .write-body { display: block; width: 100%; resize: vertical; color: var(--ink); margin: 4px 0 12px; }
 .write-body:focus-visible { outline: 2px solid var(--accent); outline-offset: 2px; }
+
+.draft-actions { display: flex; flex-wrap: wrap; align-items: center; gap: 10px 16px; margin-top: 16px; }
+.write-link:disabled { opacity: .65; cursor: not-allowed; }
+.draft-error { color: #843420; font-size: .9rem; margin-top: 10px; }
