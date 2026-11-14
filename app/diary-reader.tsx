@@ -1,8 +1,9 @@
 "use client";
 
 import Link from "next/link";
+import { useRouter } from "next/navigation";
 import type { FormEvent } from "react";
-import { useEffect, useState } from "react";
+import { useEffect, useRef, useState } from "react";
 import type { SupabaseClient, User } from "@supabase/supabase-js";
 import { supabase } from "./diary-client";
 
@@ -10,10 +11,11 @@ type Selection = { groupId?: string; entryId?: string; writing?: boolean };
 type Turn = { writer_name: string | null; is_my_turn: boolean };
 type Group = { id: string; name: string };
 type Entry = { id: string; body: string; shared_at: string };
+type Draft = Pick<Entry, "id" | "body">;
 type View =
   | { kind: "groups"; groups: Group[] }
   | { kind: "entries"; group: Group; entries: Entry[]; turn: Turn }
-  | { kind: "write"; group: Group; draftBody: string }
+  | { kind: "write"; group: Group; draft: Draft | null }
   | { kind: "entry"; group: Group; entry: Entry }
   | { kind: "missing" };
 
@@ -41,10 +43,10 @@ async function loadView(client: SupabaseClient, { groupId, entryId, writing }: S
   if (writing) {
     if (!turn?.data?.is_my_turn) return { kind: "missing" };
     // RLS limits draft reads to the signed-in author.
-    const { data, error } = await client.from("diary_entries").select("body")
+    const { data, error } = await client.from("diary_entries").select("id, body")
       .eq("group_id", groupId).is("shared_at", null).maybeSingle();
     if (error) throw error;
-    return { kind: "write", group: group.data, draftBody: data?.body ?? "" };
+    return { kind: "write", group: group.data, draft: data };
   }
 
   // RLS checks the signed-in reader's membership and when the entry was shared.
@@ -99,40 +101,98 @@ function Login({ client }: { client: SupabaseClient }) {
   );
 }
 
-function DiaryDraft({ client, group, initialBody }: { client: SupabaseClient; group: Group; initialBody: string }) {
-  const [body, setBody] = useState(initialBody);
-  const [status, setStatus] = useState<"idle" | "saving" | "saved">("idle");
+function DiaryDraft({ client, group, draft }: { client: SupabaseClient; group: Group; draft: Draft | null }) {
+  const router = useRouter();
+  const groupLink = `/?group=${group.id}`;
+  const [body, setBody] = useState(draft?.body ?? "");
+  const [savedDraft, setSavedDraft] = useState(draft);
+  const [status, setStatus] = useState<"idle" | "saving" | "saved" | "publishing">("idle");
   const [errorMessage, setErrorMessage] = useState("");
+  const requestPending = useRef(false);
+  const editorActive = useRef(false);
+  const busy = status === "saving" || status === "publishing";
+  const canPublish = Boolean(savedDraft && savedDraft.body === body && body.trim());
   const saveFailure = "下書きを保存できませんでした。もう一度お試しください。";
+
+  useEffect(() => {
+    editorActive.current = true;
+    return () => { editorActive.current = false; };
+  }, []);
 
   async function saveDraft(event: FormEvent<HTMLFormElement>) {
     event.preventDefault();
-    if (status === "saving" || !body.trim()) return;
+    if (requestPending.current || !body.trim()) return;
 
+    requestPending.current = true;
     setStatus("saving");
     setErrorMessage("");
     try {
-      const { error } = await client.rpc("save_diary_draft", {
+      const { data, error } = await client.rpc("save_diary_draft", {
         target_group: group.id,
         draft_body: body,
       });
-      if (error) {
-        setErrorMessage(error.code === "42501"
+      if (error || typeof data !== "string") {
+        setErrorMessage(error?.code === "42501"
           ? "下書きを保存できませんでした。日記一覧で今の番を確認してください。"
           : saveFailure);
         setStatus("idle");
       } else {
+        setSavedDraft({ id: data, body });
         setStatus("saved");
       }
     } catch {
       setErrorMessage(saveFailure);
       setStatus("idle");
+    } finally {
+      requestPending.current = false;
     }
+  }
+
+  async function publishDraft() {
+    if (requestPending.current || !canPublish || !savedDraft) return;
+
+    requestPending.current = true;
+    setStatus("publishing");
+    setErrorMessage("");
+    const failure = "日記を渡せませんでした。日記一覧で今の番と共有状況を確認してください。";
+    try {
+      const { data, error } = await client.rpc("publish_diary_draft", {
+        target_group: group.id,
+        target_draft: savedDraft.id,
+        expected_body: savedDraft.body,
+      });
+      if (!error && typeof data === "string") {
+        // Changing the writing selection remounts DiaryContent and loads the latest entries and turn.
+        if (editorActive.current) router.replace(groupLink);
+        return;
+      }
+      switch (error?.code) {
+        case "40001":
+          setSavedDraft(null);
+          setErrorMessage("保存済みの本文が変わりました。今の本文を保存し直してから渡してください。");
+          break;
+        case "P0002":
+          setErrorMessage("この下書きを渡せませんでした。日記一覧で共有状況を確認してください。");
+          break;
+        case "42501":
+          setErrorMessage("日記を渡せませんでした。日記一覧で今の番を確認してください。");
+          break;
+        case "22023":
+          setErrorMessage("次に日記を書くメンバーがいないため、渡せませんでした。");
+          break;
+        default:
+          setErrorMessage(failure);
+      }
+    } catch {
+      setErrorMessage(failure);
+    }
+    requestPending.current = false;
+    setStatus("idle");
   }
 
   return (
     <>
-      <Link className="back-link" href={`/?group=${group.id}`}>← 日記一覧</Link>
+      <Link className="back-link" href={groupLink}>← 日記一覧</Link>
       <article className="paper">
         <p className="paper-label">{group.name}</p>
         <h1>日記を書く</h1>
@@ -144,7 +204,7 @@ function DiaryDraft({ client, group, initialBody }: { client: SupabaseClient; gr
             rows={6}
             aria-describedby="write-note"
             value={body}
-            readOnly={status === "saving"}
+            readOnly={busy}
             onChange={(event) => {
               setBody(event.target.value);
               setErrorMessage("");
@@ -153,11 +213,23 @@ function DiaryDraft({ client, group, initialBody }: { client: SupabaseClient; gr
           />
           <p id="write-note" className="muted">下書きは自分だけが読めます。</p>
           <div className="draft-actions">
-            <button className="write-link" type="submit" disabled={status === "saving" || !body.trim()}>
+            <button className="write-link draft-save" type="submit" disabled={busy || !body.trim()}>
               {status === "saving" ? "保存中…" : "下書きを保存"}
             </button>
-            <p className="muted" role="status">{status === "saved" ? "下書きを保存しました。" : ""}</p>
+            <button
+              className="write-link"
+              type="button"
+              aria-describedby="publish-note"
+              disabled={busy || !canPublish}
+              onClick={publishDraft}
+            >
+              {status === "publishing" ? "渡しています…" : "次の人に渡す"}
+            </button>
           </div>
+          <p id="publish-note" className="muted publish-note">
+            {canPublish ? "保存した本文をグループに共有し、次の人に番を渡します。" : "本文を保存すると、次の人に渡せます。"}
+          </p>
+          <p className="muted" role="status">{status === "saved" ? "下書きを保存しました。" : ""}</p>
           {errorMessage && <p className="draft-error" role="alert">{errorMessage}</p>}
         </form>
       </article>
@@ -201,7 +273,7 @@ function DiaryContent({ client, groupId, entryId, writing }: Selection & { clien
 
   const groupLink = `/?group=${view.group.id}`;
   if (view.kind === "write") {
-    return <DiaryDraft client={client} group={view.group} initialBody={view.draftBody} />;
+    return <DiaryDraft client={client} group={view.group} draft={view.draft} />;
   }
   if (view.kind === "entries") return (
     <>

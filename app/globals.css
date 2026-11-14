@@ -141,5 +141,8 @@ h1:focus { outline: none; }
 .write-body:focus-visible { outline: 2px solid var(--accent); outline-offset: 2px; }
 
 .draft-actions { display: flex; flex-wrap: wrap; align-items: center; gap: 10px 16px; margin-top: 16px; }
+.draft-save { border: 1px solid var(--line); background: var(--paper); color: var(--ink); }
+.draft-save:hover { background: #eee8dc; }
+.publish-note { margin-top: 8px; }
 .write-link:disabled { opacity: .65; cursor: not-allowed; }
 .draft-error { color: #843420; font-size: .9rem; margin-top: 10px; }
