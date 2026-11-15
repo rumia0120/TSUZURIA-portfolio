@@ -3,17 +3,18 @@
 import Link from "next/link";
 import { useRouter } from "next/navigation";
 import type { FormEvent } from "react";
-import { useEffect, useRef, useState } from "react";
+import { useEffect, useRef, useState, useSyncExternalStore } from "react";
 import type { SupabaseClient, User } from "@supabase/supabase-js";
 import { supabase } from "./diary-client";
+import { clearInviteLink, GroupMembershipForm, InviteLink, isInviteToken, readInviteToken, subscribeToInviteLink } from "./diary-groups";
 
 type Selection = { groupId?: string; entryId?: string; writing?: boolean };
 type Turn = { writer_name: string | null; is_my_turn: boolean };
-type Group = { id: string; name: string };
+type Group = { id: string; name: string; created_by: string | null };
 type Entry = { id: string; body: string; shared_at: string };
 type Draft = Pick<Entry, "id" | "body">;
 type View =
-  | { kind: "groups"; groups: Group[] }
+  | { kind: "groups"; groups: Pick<Group, "id" | "name">[] }
   | { kind: "entries"; group: Group; entries: Entry[]; turn: Turn }
   | { kind: "write"; group: Group; draft: Draft | null }
   | { kind: "entry"; group: Group; entry: Entry }
@@ -33,7 +34,7 @@ async function loadView(client: SupabaseClient, { groupId, entryId, writing }: S
   }
   if (!uuid.test(groupId) || (entryId && !uuid.test(entryId))) return { kind: "missing" };
 
-  const group = await client.from("diary_groups").select("id, name").eq("id", groupId).maybeSingle();
+  const group = await client.from("diary_groups").select("id, name, created_by").eq("id", groupId).maybeSingle();
   if (group.error) throw group.error;
   if (!group.data) return { kind: "missing" };
 
@@ -63,21 +64,38 @@ async function loadView(client: SupabaseClient, { groupId, entryId, writing }: S
   return { kind: "entries", group: group.data, entries: data, turn: turn.data };
 }
 
-function Login({ client }: { client: SupabaseClient }) {
+function Login({ client, inviteToken }: { client: SupabaseClient; inviteToken: string | null }) {
+  const invited = isInviteToken(inviteToken);
   const [pending, setPending] = useState(false);
   const [error, setError] = useState("");
+  const [message, setMessage] = useState("");
+  const [registering, setRegistering] = useState(false);
 
   async function signIn(event: FormEvent<HTMLFormElement>) {
     event.preventDefault();
     const form = new FormData(event.currentTarget);
     setPending(true);
     setError("");
+    setMessage("");
     try {
-      const result = await client.auth.signInWithPassword({
+      const credentials = {
         email: String(form.get("email")).trim(),
         password: String(form.get("password")),
-      });
-      if (result.error) setError("ログインできませんでした。入力内容を確認してください。");
+      };
+      if (registering) {
+        const { data, error } = await client.auth.signUp({
+          ...credentials,
+          options: { emailRedirectTo: `${window.location.origin}/` },
+        });
+        if (error) {
+          setError("アカウントを作成できませんでした。入力内容を確認してください。");
+        } else if (!data.session) {
+          setMessage("確認メールが届いたら、メールアドレスを確認してから元の招待リンクを開き直してください。");
+        }
+      } else {
+        const { error } = await client.auth.signInWithPassword(credentials);
+        if (error) setError("ログインできませんでした。入力内容を確認してください。");
+      }
     } catch {
       setError("接続できませんでした。少し待ってからお試しください。");
     } finally {
@@ -89,13 +107,33 @@ function Login({ client }: { client: SupabaseClient }) {
     <main className="preview-shell welcome">
       <section className="login-panel" aria-labelledby="login-title">
         <div className="brand">Tsuzuria</div>
-        <h1 id="login-title">ログイン</h1>
+        <h1 id="login-title">{registering ? "アカウントを作る" : "ログイン"}</h1>
+        {invited && <p className="muted">グループに参加するためにログインしてください。</p>}
         <form className="reader-login" onSubmit={signIn}>
           <label>メールアドレス<input name="email" type="email" autoComplete="username" required /></label>
-          <label>パスワード<input name="password" type="password" autoComplete="current-password" required /></label>
+          <label>パスワード<input name="password" type="password" autoComplete={registering ? "new-password" : "current-password"} required /></label>
           {error && <p role="alert">{error}</p>}
-          <button type="submit" disabled={pending}>{pending ? "ログイン中…" : "ログイン"}</button>
+          {message && <p role="status">{message}</p>}
+          <button type="submit" disabled={pending}>
+            {registering ? (pending ? "作成中…" : "アカウントを作る") : (pending ? "ログイン中…" : "ログイン")}
+          </button>
         </form>
+        {invited && (
+          <div className="draft-actions">
+            <button className="back-link" type="button" disabled={pending} onClick={() => {
+              setRegistering(!registering);
+              setError("");
+              setMessage("");
+            }}>{registering ? "ログインに戻る" : "アカウントを作る"}</button>
+            <button className="back-link" type="button" disabled={pending} onClick={clearInviteLink}>招待を閉じる</button>
+          </div>
+        )}
+        {inviteToken !== null && !invited && (
+          <div className="invite-panel">
+            <p role="alert">この招待リンクは使えません。招待した人に新しいリンクをお願いしてください。</p>
+            <button className="back-link" type="button" onClick={clearInviteLink}>招待を閉じる</button>
+          </div>
+        )}
       </section>
     </main>
   );
@@ -237,7 +275,8 @@ function DiaryDraft({ client, group, draft }: { client: SupabaseClient; group: G
   );
 }
 
-function DiaryContent({ client, groupId, entryId, writing }: Selection & { client: SupabaseClient }) {
+function DiaryContent({ client, user, groupId, entryId, writing }: Selection & { client: SupabaseClient; user: User }) {
+  const [creatingGroup, setCreatingGroup] = useState(false);
   const [view, setView] = useState<View | null>(null);
   const [failed, setFailed] = useState(false);
   const [attempt, setAttempt] = useState(0);
@@ -255,9 +294,15 @@ function DiaryContent({ client, groupId, entryId, writing }: Selection & { clien
     <button className="back-link" onClick={() => { setFailed(false); setAttempt((n) => n + 1); }}>再試行</button></>;
   if (!view) return <p role="status">読み込み中…</p>;
   if (view.kind === "missing") return <><h1>日記を開けません</h1><Link className="back-link" href="/">マイグループへ</Link></>;
+  if (view.kind === "groups" && creatingGroup) {
+    return <GroupMembershipForm client={client} user={user} onCancel={() => setCreatingGroup(false)} />;
+  }
   if (view.kind === "groups") return (
     <>
-      <h1>マイグループ</h1>
+      <div className="group-header">
+        <h1>マイグループ</h1>
+        <button className="write-link" type="button" onClick={() => setCreatingGroup(true)}>グループを作る</button>
+      </div>
       {view.groups.length === 0 && <p className="muted">参加中のグループはありません。</p>}
       <div className="group-list">
         {view.groups.map((group) => (
@@ -283,6 +328,15 @@ function DiaryContent({ client, groupId, entryId, writing }: Selection & { clien
         <p>{view.turn.is_my_turn ? "あなたの番です" : view.turn.writer_name ? `今は${view.turn.writer_name}さんの番です` : "まだ番は決まっていません"}</p>
         {view.turn.is_my_turn && <Link className="write-link" href={`${groupLink}&write=1`}>日記を書く</Link>}
       </section>
+      {view.group.created_by && !view.turn.writer_name && (
+        <div className="group-waiting">
+          <p className="muted">3人そろうと日記を始められます。</p>
+          <button className="back-link" type="button" onClick={() => setAttempt((n) => n + 1)}>
+            参加状況を更新
+          </button>
+        </div>
+      )}
+      {view.group.created_by === user.id && <InviteLink client={client} groupId={view.group.id} />}
       <h2 className="list-heading">日記一覧 <span>{view.entries.length}件</span></h2>
       {view.entries.length === 0 && <p className="muted">共有された日記はまだありません。</p>}
       <ul className="entry-list">
@@ -312,6 +366,7 @@ function DiaryContent({ client, groupId, entryId, writing }: Selection & { clien
 }
 
 export default function DiaryReader({ groupId, entryId, writing }: Selection) {
+  const inviteToken = useSyncExternalStore(subscribeToInviteLink, readInviteToken, () => null);
   const [user, setUser] = useState<User | null | undefined>();
   const [signingOut, setSigningOut] = useState(false);
   const [logoutError, setLogoutError] = useState(false);
@@ -325,7 +380,7 @@ export default function DiaryReader({ groupId, entryId, writing }: Selection) {
 
   if (!client) return <main className="preview-shell">Supabase の接続設定を確認してください。</main>;
   if (user === undefined) return <main className="preview-shell"><p role="status">ログイン状態を確認中…</p></main>;
-  if (!user) return <Login client={client} />;
+  if (!user) return <Login key={inviteToken} client={client} inviteToken={inviteToken} />;
 
   async function signOut() {
     if (!client) return;
@@ -349,7 +404,9 @@ export default function DiaryReader({ groupId, entryId, writing }: Selection) {
       </header>
       <main className="app-content">
         {logoutError && <p role="alert">ログアウトできませんでした。もう一度お試しください。</p>}
-        <DiaryContent key={JSON.stringify([user.id, groupId, entryId, writing])} client={client} groupId={groupId} entryId={entryId} writing={writing} />
+        {inviteToken !== null
+          ? <GroupMembershipForm key={JSON.stringify([user.id, inviteToken])} client={client} user={user} inviteToken={inviteToken} onCancel={clearInviteLink} />
+          : <DiaryContent key={JSON.stringify([user.id, groupId, entryId, writing])} client={client} user={user} groupId={groupId} entryId={entryId} writing={writing} />}
       </main>
     </div>
   );
