@@ -39,8 +39,9 @@ insert into public.diary_entries (id, group_id, author_member_id, body)
 values ('50000000-0000-0000-0000-000000000006', current_setting('test.exit_group')::uuid,
   '40000000-0000-0000-0000-000000000003', 'Old draft from writer 3');
 
-insert into public.diary_reactions (entry_id, user_id, kind)
-values ('50000000-0000-0000-0000-000000000003', '31000000-0000-0000-0000-000000000001', 'heart');
+insert into public.diary_reactions (entry_id, user_id, kind, member_id)
+values ('50000000-0000-0000-0000-000000000003', '31000000-0000-0000-0000-000000000001', 'heart',
+  '40000000-0000-0000-0000-000000000001');
 
 select ok(
   not has_function_privilege('anon', 'public.leave_diary_group(uuid, uuid)', 'execute'),

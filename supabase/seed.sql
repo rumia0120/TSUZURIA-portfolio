@@ -48,5 +48,6 @@ insert into public.diary_entries (id, group_id, author_member_id, body, created_
    '20000000-0000-4000-8000-000000000006', '新しいお茶を試した。',
    '2026-11-09T10:00Z', '2026-11-09T10:05Z');
 
-insert into public.diary_reactions (entry_id, user_id, kind) values
-  ('30000000-0000-4000-8000-000000000002', '00000000-0000-4000-8000-000000000003', 'heart');
+insert into public.diary_reactions (entry_id, user_id, kind, member_id) values
+  ('30000000-0000-4000-8000-000000000002', '00000000-0000-4000-8000-000000000003', 'heart',
+   '20000000-0000-4000-8000-000000000003');

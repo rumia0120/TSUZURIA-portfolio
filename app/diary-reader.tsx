@@ -7,6 +7,7 @@ import { useEffect, useRef, useState, useSyncExternalStore } from "react";
 import type { SupabaseClient, User } from "@supabase/supabase-js";
 import { supabase } from "./diary-client";
 import { clearInviteLink, GroupMembershipForm, InviteLink, isInviteToken, LeaveGroup, readInviteToken, subscribeToInviteLink } from "./diary-groups";
+import { DiaryReactions } from "./diary-reactions";
 
 type Selection = { groupId?: string; entryId?: string; writing?: boolean };
 type Turn = { writer_name: string | null; is_my_turn: boolean };
@@ -379,6 +380,7 @@ function DiaryContent({ client, user, groupId, entryId, writing }: Selection & {
         <p className="paper-label">{view.group.name}</p>
         <h1><time dateTime={view.entry.shared_at}>{date.format(new Date(view.entry.shared_at))}</time>の日記</h1>
         <div className="paper-body reader-body">{view.entry.body}</div>
+        <DiaryReactions client={client} entryId={view.entry.id} userId={user.id} />
       </article>
     </>
   );
