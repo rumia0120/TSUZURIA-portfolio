@@ -222,3 +222,68 @@ export function InviteLink({ client, groupId }: { client: SupabaseClient; groupI
     </section>
   );
 }
+
+type LeaveGroupProps = {
+  client: SupabaseClient;
+  groupId: string;
+  groupName: string;
+  membershipId: string;
+  onLeft: () => void;
+};
+
+export function LeaveGroup({ client, groupId, groupName, membershipId, onLeft }: LeaveGroupProps) {
+  const dialog = useRef<HTMLDialogElement>(null);
+  const requestPending = useRef(false);
+  const [pending, setPending] = useState(false);
+  const [error, setError] = useState("");
+
+  async function leave() {
+    if (requestPending.current) return;
+    requestPending.current = true;
+    setPending(true);
+    setError("");
+
+    try {
+      const { error } = await client.rpc("leave_diary_group", {
+        target_group: groupId,
+        expected_membership: membershipId,
+      });
+      if (error) throw error;
+      if (dialog.current?.open) onLeft();
+    } catch {
+      requestPending.current = false;
+      setPending(false);
+      setError("退出できませんでした。もう一度お試しください。");
+    }
+  }
+
+  return (
+    <div className="leave-group">
+      <button className="back-link" type="button" onClick={() => {
+        setError("");
+        dialog.current?.showModal();
+      }}>グループから退出</button>
+      <dialog
+        ref={dialog}
+        className="leave-dialog"
+        aria-labelledby="leave-title"
+        aria-describedby="leave-consequences"
+        onCancel={(event) => { if (requestPending.current) event.preventDefault(); }}
+      >
+        <h2 id="leave-title">グループから退出しますか？</h2>
+        <p id="leave-consequences">
+          退出すると「{groupName}」の日記を読めなくなります。あなたが共有した日記はグループに表示されなくなり、再参加しても表示されません。
+        </p>
+        {error && <p className="draft-error" role="alert">{error}</p>}
+        <div className="draft-actions">
+          <button className="write-link draft-save" type="button" disabled={pending} onClick={() => dialog.current?.close()}>
+            キャンセル
+          </button>
+          <button className="write-link" type="button" disabled={pending} onClick={leave}>
+            {pending ? "退出中…" : "退出する"}
+          </button>
+        </div>
+      </dialog>
+    </div>
+  );
+}

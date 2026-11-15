@@ -6,7 +6,7 @@ import type { FormEvent } from "react";
 import { useEffect, useRef, useState, useSyncExternalStore } from "react";
 import type { SupabaseClient, User } from "@supabase/supabase-js";
 import { supabase } from "./diary-client";
-import { clearInviteLink, GroupMembershipForm, InviteLink, isInviteToken, readInviteToken, subscribeToInviteLink } from "./diary-groups";
+import { clearInviteLink, GroupMembershipForm, InviteLink, isInviteToken, LeaveGroup, readInviteToken, subscribeToInviteLink } from "./diary-groups";
 
 type Selection = { groupId?: string; entryId?: string; writing?: boolean };
 type Turn = { writer_name: string | null; is_my_turn: boolean };
@@ -15,7 +15,7 @@ type Entry = { id: string; body: string; shared_at: string };
 type Draft = Pick<Entry, "id" | "body">;
 type View =
   | { kind: "groups"; groups: Pick<Group, "id" | "name">[] }
-  | { kind: "entries"; group: Group; entries: Entry[]; turn: Turn }
+  | { kind: "entries"; group: Group; entries: Entry[]; turn: Turn; membershipId: string }
   | { kind: "write"; group: Group; draft: Draft | null }
   | { kind: "entry"; group: Group; entry: Entry }
   | { kind: "missing" };
@@ -58,10 +58,14 @@ async function loadView(client: SupabaseClient, { groupId, entryId, writing }: S
     if (error) throw error;
     return data ? { kind: "entry", group: group.data, entry: data } : { kind: "missing" };
   }
-  const { data, error } = await shared.order("shared_at", { ascending: false });
-  if (error) throw error;
-  if (!turn?.data) return { kind: "missing" };
-  return { kind: "entries", group: group.data, entries: data, turn: turn.data };
+  const [entries, membership] = await Promise.all([
+    shared.order("shared_at", { ascending: false }),
+    client.from("group_members").select("id").eq("group_id", groupId).is("left_at", null).maybeSingle(),
+  ]);
+  if (entries.error) throw entries.error;
+  if (membership.error) throw membership.error;
+  if (!turn?.data || !membership.data) return { kind: "missing" };
+  return { kind: "entries", group: group.data, entries: entries.data, turn: turn.data, membershipId: membership.data.id };
 }
 
 function Login({ client, inviteToken }: { client: SupabaseClient; inviteToken: string | null }) {
@@ -276,20 +280,24 @@ function DiaryDraft({ client, group, draft }: { client: SupabaseClient; group: G
 }
 
 function DiaryContent({ client, user, groupId, entryId, writing }: Selection & { client: SupabaseClient; user: User }) {
+  const router = useRouter();
   const [creatingGroup, setCreatingGroup] = useState(false);
+  const [leftGroup, setLeftGroup] = useState(false);
   const [view, setView] = useState<View | null>(null);
   const [failed, setFailed] = useState(false);
   const [attempt, setAttempt] = useState(0);
 
   useEffect(() => {
+    if (leftGroup) return;
     let active = true;
     loadView(client, { groupId, entryId, writing }).then(
       (next) => { if (active) setView(next); },
       () => { if (active) setFailed(true); },
     );
     return () => { active = false; };
-  }, [client, groupId, entryId, writing, attempt]);
+  }, [client, groupId, entryId, writing, attempt, leftGroup]);
 
+  if (leftGroup) return <p role="status">グループを退出しました。</p>;
   if (failed) return <><p role="alert">日記を読み込めませんでした。</p>
     <button className="back-link" onClick={() => { setFailed(false); setAttempt((n) => n + 1); }}>再試行</button></>;
   if (!view) return <p role="status">読み込み中…</p>;
@@ -325,12 +333,12 @@ function DiaryContent({ client, user, groupId, entryId, writing }: Selection & {
       <Link className="back-link" href="/">← マイグループ</Link>
       <h1>{view.group.name}</h1>
       <section className="turn-summary" aria-label="日記の順番">
-        <p>{view.turn.is_my_turn ? "あなたの番です" : view.turn.writer_name ? `今は${view.turn.writer_name}さんの番です` : "まだ番は決まっていません"}</p>
+        <p>{view.turn.is_my_turn ? "あなたの番です" : view.turn.writer_name ? `今は${view.turn.writer_name}さんの番です` : "メンバーの参加を待っています"}</p>
         {view.turn.is_my_turn && <Link className="write-link" href={`${groupLink}&write=1`}>日記を書く</Link>}
       </section>
-      {view.group.created_by && !view.turn.writer_name && (
+      {!view.turn.is_my_turn && !view.turn.writer_name && (
         <div className="group-waiting">
-          <p className="muted">3人そろうと日記を始められます。</p>
+          <p className="muted">3人そろうと日記を回せます。</p>
           <button className="back-link" type="button" onClick={() => setAttempt((n) => n + 1)}>
             参加状況を更新
           </button>
@@ -350,6 +358,17 @@ function DiaryContent({ client, user, groupId, entryId, writing }: Selection & {
           </li>
         ))}
       </ul>
+      <LeaveGroup
+        client={client}
+        groupId={view.group.id}
+        groupName={view.group.name}
+        membershipId={view.membershipId}
+        onLeft={() => {
+          setLeftGroup(true);
+          setView(null);
+          router.replace("/");
+        }}
+      />
     </>
   );
 
