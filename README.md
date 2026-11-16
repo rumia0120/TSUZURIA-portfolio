@@ -74,7 +74,7 @@ npm run build
 | `TURN_EMAIL_APP_URL` | メールから開くアプリの HTTPS URL |
 | `TURN_EMAIL_CRON_SECRET` | スケジューラーだけが知るランダムなシークレット（32文字以上） |
 
-Supabase Cron と Vault を使う場合は、Vault に `tsuzuria_project_url` と `tsuzuria_turn_email_cron_secret` を保存します。後者には Edge Function Secrets の `TURN_EMAIL_CRON_SECRET` と同じ値を設定します。5分間隔のジョブを登録する例です。
+Supabase Cron と `pg_net` を有効にし、Vault に `tsuzuria_project_url` と `tsuzuria_turn_email_cron_secret` を保存します。後者には Edge Function Secrets の `TURN_EMAIL_CRON_SECRET` と同じ値を設定します。5分間隔のジョブを登録する例です。
 
 ```sql
 select cron.schedule('tsuzuria-turn-emails', '*/5 * * * *', $job$
@@ -85,7 +85,8 @@ select cron.schedule('tsuzuria-turn-emails', '*/5 * * * *', $job$
       'Content-Type', 'application/json',
       'Authorization', 'Bearer ' || (select decrypted_secret from vault.decrypted_secrets
         where name = 'tsuzuria_turn_email_cron_secret')
-    )
+    ),
+    timeout_milliseconds := 55000
   );
 $job$);
 ```
