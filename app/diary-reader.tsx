@@ -77,7 +77,7 @@ function Login({ client, inviteToken }: { client: SupabaseClient; inviteToken: s
   const [message, setMessage] = useState("");
   const [registering, setRegistering] = useState(false);
 
-  async function signIn(event: FormEvent<HTMLFormElement>) {
+  async function submitCredentials(event: FormEvent<HTMLFormElement>) {
     event.preventDefault();
     const form = new FormData(event.currentTarget);
     setPending(true);
@@ -96,7 +96,9 @@ function Login({ client, inviteToken }: { client: SupabaseClient; inviteToken: s
         if (error) {
           setError("アカウントを作成できませんでした。入力内容を確認してください。");
         } else if (!data.session) {
-          setMessage("確認メールが届いたら、メールアドレスを確認してから元の招待リンクを開き直してください。");
+          setMessage(invited
+            ? "確認メールが届いたら、メールアドレスを確認してから元の招待リンクを開き直してください。"
+            : "確認メールを開いてメールアドレスを確認したあと、ログインしてください。");
         }
       } else {
         const { error } = await client.auth.signInWithPassword(credentials);
@@ -113,27 +115,27 @@ function Login({ client, inviteToken }: { client: SupabaseClient; inviteToken: s
     <main className="preview-shell welcome">
       <section className="login-panel" aria-labelledby="login-title">
         <div className="brand">Tsuzuria</div>
-        <h1 id="login-title">{registering ? "アカウントを作る" : "ログイン"}</h1>
-        {invited && <p className="muted">グループに参加するためにログインしてください。</p>}
-        <form className="reader-login" onSubmit={signIn}>
+        <h1 id="login-title">{registering ? "新規登録" : "ログイン"}</h1>
+        {invited && !registering && <p className="muted">グループに参加するためにログインしてください。</p>}
+        <form className="reader-login" onSubmit={submitCredentials}>
           <label>メールアドレス<input name="email" type="email" autoComplete="username" required /></label>
-          <label>パスワード<input name="password" type="password" autoComplete={registering ? "new-password" : "current-password"} required /></label>
+          <label>パスワード<input key={registering ? "new-password" : "current-password"} name="password" type="password" autoComplete={registering ? "new-password" : "current-password"} required /></label>
           {error && <p role="alert">{error}</p>}
           {message && <p role="status">{message}</p>}
           <button type="submit" disabled={pending}>
             {registering ? (pending ? "作成中…" : "アカウントを作る") : (pending ? "ログイン中…" : "ログイン")}
           </button>
         </form>
-        {invited && (
-          <div className="draft-actions">
-            <button className="back-link" type="button" disabled={pending} onClick={() => {
-              setRegistering(!registering);
-              setError("");
-              setMessage("");
-            }}>{registering ? "ログインに戻る" : "アカウントを作る"}</button>
+        <div className="draft-actions">
+          <button className="back-link" type="button" disabled={pending} onClick={() => {
+            setRegistering((previous) => !previous);
+            setError("");
+            setMessage("");
+          }}>{registering ? "ログインに戻る" : "新規登録"}</button>
+          {invited && (
             <button className="back-link" type="button" disabled={pending} onClick={clearInviteLink}>招待を閉じる</button>
-          </div>
-        )}
+          )}
+        </div>
         {inviteToken !== null && !invited && (
           <div className="invite-panel">
             <p role="alert">この招待リンクは使えません。招待した人に新しいリンクをお願いしてください。</p>
