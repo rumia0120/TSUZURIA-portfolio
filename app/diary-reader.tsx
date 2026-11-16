@@ -8,6 +8,7 @@ import type { SupabaseClient, User } from "@supabase/supabase-js";
 import { supabase } from "./diary-client";
 import { clearInviteLink, GroupMembershipForm, InviteLink, isInviteToken, LeaveGroup, readInviteToken, subscribeToInviteLink } from "./diary-groups";
 import { DiaryReactions } from "./diary-reactions";
+import { TurnEmailPreference } from "./turn-email-preference";
 
 type Selection = { groupId?: string; entryId?: string; writing?: boolean };
 type Turn = { writer_name: string | null; is_my_turn: boolean };
@@ -322,6 +323,7 @@ function DiaryContent({ client, user, groupId, entryId, writing }: Selection & {
           </Link>
         ))}
       </div>
+      <TurnEmailPreference client={client} hasVerifiedEmail={Boolean(user.email && user.email_confirmed_at)} />
     </>
   );
 

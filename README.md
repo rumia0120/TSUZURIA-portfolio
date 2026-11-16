@@ -56,3 +56,42 @@ npm run build
 1. A でログインし、「週末の交換日記」から「久しぶりに本を一冊読み終えた。」を開く。参加前の投稿と下書きは一覧に表示されない。
 2. ログアウトして B でログインし、「放課後の交換日記」だけが表示されることを確認する。
 3. B の状態で A の本文URLを開き、「日記を開けません」と表示されることを確認する。ログアウト後は同じURLでログイン画面が出る。
+
+## 番が回ったときのメール通知
+
+「マイグループ」で通知をオンにすると、日記を渡されたときに、確認済みのメールアドレスへ通知を送ります。初期設定はオフです。メールには「あなたの番です」とアプリのURLを載せます。
+
+日記の共有と担当交代の処理は、DBに送信予定を記録した時点で完了します。宛先は送信直前に取得し、通知をオフにした人や、すでに番が過ぎた人には送信しません。一時的な送信失敗は、6時間以内に最大5回まで試行します。
+
+### 配信を有効にする
+
+対象プロジェクトにDBマイグレーションを適用し、Supabase Edge Function の `turn-emails` をデプロイします。送信元を Resend に登録し、以下の値を対象プロジェクトの Edge Function Secrets に設定します。
+
+| キー | 内容 |
+| --- | --- |
+| `RESEND_API_KEY` | メール送信用の Resend API キー |
+| `TURN_EMAIL_FROM` | Resend で送信可能な From アドレス |
+| `TURN_EMAIL_APP_URL` | メールから開くアプリの HTTPS URL |
+| `TURN_EMAIL_CRON_SECRET` | スケジューラーだけが知るランダムなシークレット（32文字以上） |
+
+Supabase Cron と Vault を使う場合は、Vault に `tsuzuria_project_url` と `tsuzuria_turn_email_cron_secret` を保存します。後者には Edge Function Secrets の `TURN_EMAIL_CRON_SECRET` と同じ値を設定します。5分間隔のジョブを登録する例です。
+
+```sql
+select cron.schedule('tsuzuria-turn-emails', '*/5 * * * *', $job$
+  select net.http_post(
+    url := rtrim((select decrypted_secret from vault.decrypted_secrets
+      where name = 'tsuzuria_project_url'), '/') || '/functions/v1/turn-emails',
+    headers := jsonb_build_object(
+      'Content-Type', 'application/json',
+      'Authorization', 'Bearer ' || (select decrypted_secret from vault.decrypted_secrets
+        where name = 'tsuzuria_turn_email_cron_secret')
+    )
+  );
+$job$);
+```
+
+接続後は、確認用のメンバーで通知をオンにし、別のメンバーが日記を渡したときに宛先へ1通届くことを確認します。
+
+ローカルのDBは `supabase test db` で、送信処理は `node --test supabase/tests/turn_emails_worker.test.mjs` で検証できます。送信テストは Resend の応答を模擬します。
+
+[Supabase の定期実行](https://supabase.com/docs/guides/functions/schedule-functions) · [Resend の再送時の重複防止](https://resend.com/docs/dashboard/emails/idempotency-keys)
