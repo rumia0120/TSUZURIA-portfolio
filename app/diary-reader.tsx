@@ -74,7 +74,7 @@ function Login({ client, inviteToken }: { client: SupabaseClient; inviteToken: s
   const invited = isInviteToken(inviteToken);
   const [pending, setPending] = useState(false);
   const [error, setError] = useState("");
-  const [message, setMessage] = useState("");
+  const [showRegistrationGuide, setShowRegistrationGuide] = useState(false);
   const [registering, setRegistering] = useState(false);
 
   async function submitCredentials(event: FormEvent<HTMLFormElement>) {
@@ -82,7 +82,7 @@ function Login({ client, inviteToken }: { client: SupabaseClient; inviteToken: s
     const form = new FormData(event.currentTarget);
     setPending(true);
     setError("");
-    setMessage("");
+    setShowRegistrationGuide(false);
     try {
       const credentials = {
         email: String(form.get("email")).trim(),
@@ -93,12 +93,11 @@ function Login({ client, inviteToken }: { client: SupabaseClient; inviteToken: s
           ...credentials,
           options: { emailRedirectTo: `${window.location.origin}/` },
         });
-        if (error) {
+        const alreadyRegistered = error?.code === "user_already_exists" || error?.code === "email_exists";
+        if (error && !alreadyRegistered) {
           setError("アカウントを作成できませんでした。入力内容を確認してください。");
-        } else if (!data.session) {
-          setMessage(invited
-            ? "確認メールが届いたら、メールアドレスを確認してから元の招待リンクを開き直してください。"
-            : "確認メールを開いてメールアドレスを確認したあと、ログインしてください。");
+        } else if (!data?.session) {
+          setShowRegistrationGuide(true);
         }
       } else {
         const { error } = await client.auth.signInWithPassword(credentials);
@@ -121,7 +120,13 @@ function Login({ client, inviteToken }: { client: SupabaseClient; inviteToken: s
           <label>メールアドレス<input name="email" type="email" autoComplete="username" required /></label>
           <label>パスワード<input key={registering ? "new-password" : "current-password"} name="password" type="password" autoComplete={registering ? "new-password" : "current-password"} required /></label>
           {error && <p role="alert">{error}</p>}
-          {message && <p role="status">{message}</p>}
+          {showRegistrationGuide && (
+            <div role="status">
+              <p>確認メールが届いたら、リンクを開いて登録を完了してください。</p>
+              <p>すでにアカウントをお持ちの場合は、そのままログインできます。</p>
+              {invited && <p>メール確認後は、元の招待リンクからグループに参加できます。</p>}
+            </div>
+          )}
           <button type="submit" disabled={pending}>
             {registering ? (pending ? "作成中…" : "アカウントを作る") : (pending ? "ログイン中…" : "ログイン")}
           </button>
@@ -130,8 +135,8 @@ function Login({ client, inviteToken }: { client: SupabaseClient; inviteToken: s
           <button className="back-link" type="button" disabled={pending} onClick={() => {
             setRegistering((previous) => !previous);
             setError("");
-            setMessage("");
-          }}>{registering ? "ログインに戻る" : "新規登録"}</button>
+            setShowRegistrationGuide(false);
+          }}>{registering ? (showRegistrationGuide ? "ログインへ" : "ログインに戻る") : "新規登録"}</button>
           {invited && (
             <button className="back-link" type="button" disabled={pending} onClick={clearInviteLink}>招待を閉じる</button>
           )}
