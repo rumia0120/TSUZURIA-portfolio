@@ -50,10 +50,13 @@ type MembershipFormProps = {
   inviteToken?: string;
 };
 
+type MembershipDetails =
+  | { kind: "ready"; profile: { display_name: string } | null; inviteGroupName: string | null }
+  | { kind: "failed"; message: string; retry: boolean };
+
 export function GroupMembershipForm({ client, user, inviteToken, onCancel }: MembershipFormProps) {
   const router = useRouter();
-  const [profile, setProfile] = useState<{ display_name: string } | null>();
-  const [profileError, setProfileError] = useState(false);
+  const [details, setDetails] = useState<MembershipDetails>();
   const [attempt, setAttempt] = useState(0);
   const [pending, setPending] = useState(false);
   const [error, setError] = useState("");
@@ -66,17 +69,28 @@ export function GroupMembershipForm({ client, user, inviteToken, onCancel }: Mem
     let ignore = false;
     active.current = true;
 
-    async function loadProfile() {
+    async function loadDetails() {
+      const loadFailure = joining ? "招待の内容を読み込めませんでした。" : "表示名を読み込めませんでした。";
       try {
-        const { data, error } = await client.from("profiles")
-          .select("display_name").eq("id", user.id).maybeSingle();
-        if (error) throw error;
-        if (!ignore) setProfile(data);
+        const [profile, invite] = await Promise.all([
+          client.from("profiles").select("display_name").eq("id", user.id).maybeSingle(),
+          joining ? client.rpc("preview_diary_invite", { invite_token: inviteToken }) : null,
+        ]);
+        if (ignore) return;
+        const code = invite?.error?.code;
+        if (code === "P0002" || code === "23514" || code === "23505") {
+          setDetails({ kind: "failed", message: membershipError(code, true), retry: false });
+          return;
+        }
+        if (profile.error || (invite && (invite.error || typeof invite.data !== "string" || !invite.data))) {
+          throw new Error(loadFailure);
+        }
+        setDetails({ kind: "ready", profile: profile.data, inviteGroupName: invite?.data ?? null });
       } catch {
-        if (!ignore) setProfileError(true);
+        if (!ignore) setDetails({ kind: "failed", message: loadFailure, retry: true });
       }
     }
-    if (!joining || tokenPattern.test(inviteToken)) void loadProfile();
+    if (!joining || tokenPattern.test(inviteToken)) void loadDetails();
 
     return () => {
       ignore = true;
@@ -86,10 +100,10 @@ export function GroupMembershipForm({ client, user, inviteToken, onCancel }: Mem
 
   async function submit(event: FormEvent<HTMLFormElement>) {
     event.preventDefault();
-    if (requestPending.current || profile === undefined) return;
+    if (requestPending.current || details?.kind !== "ready") return;
 
     const fields = new FormData(event.currentTarget);
-    const displayName = profile?.display_name ?? String(fields.get("displayName") ?? "").trim();
+    const displayName = details.profile?.display_name ?? String(fields.get("displayName") ?? "").trim();
     const groupName = String(fields.get("groupName") ?? "").trim();
     if (!displayName || (!joining && !groupName)) {
       setError(membershipError("22023", joining));
@@ -129,29 +143,35 @@ export function GroupMembershipForm({ client, user, inviteToken, onCancel }: Mem
 
   return (
     <section aria-labelledby="membership-title">
-      <h1 id="membership-title">{joining ? "グループへの招待" : "グループを作る"}</h1>
-      {joining && <p className="muted">{user.email ? `${user.email} で参加します。` : "ログイン中のアカウントで参加します。"}</p>}
+      <h1 id="membership-title">
+        {details?.kind === "ready" && details.inviteGroupName
+          ? `「${details.inviteGroupName}」への招待`
+          : joining ? "グループへの招待" : "グループを作る"}
+      </h1>
       {joining && !tokenPattern.test(inviteToken) ? (
         <p role="alert" className="draft-error">{membershipError("P0002", true)}</p>
-      ) : profileError ? (
+      ) : details?.kind === "failed" ? (
         <>
-          <p role="alert" className="draft-error">表示名を読み込めませんでした。</p>
-          <button className="back-link" type="button" onClick={() => {
-            setProfileError(false);
+          <p role="alert" className="draft-error">{details.message}</p>
+          {details.retry && <button className="back-link" type="button" onClick={() => {
+            setDetails(undefined);
             setAttempt((value) => value + 1);
-          }}>再試行</button>
+          }}>再試行</button>}
         </>
-      ) : profile === undefined ? (
-        <p className="muted" role="status">読み込み中…</p>
+      ) : !details ? (
+        <p className="muted" role="status">{joining ? "招待の内容を確認中…" : "読み込み中…"}</p>
       ) : (
-        <form className="reader-login group-form" onSubmit={submit}>
-          {!joining && <label>グループ名<input name="groupName" maxLength={100} required /></label>}
-          {!profile && <label>表示名<input name="displayName" autoComplete="nickname" maxLength={80} required /></label>}
-          {error && <p className="draft-error" role="alert">{error}</p>}
-          <button type="submit" disabled={pending}>
-            {pending ? (joining ? "参加中…" : "作成中…") : (joining ? "参加する" : "作成する")}
-          </button>
-        </form>
+        <>
+          {joining && <p className="muted">{user.email ? `${user.email} で参加します。` : "ログイン中のアカウントで参加します。"}</p>}
+          <form className="reader-login group-form" onSubmit={submit}>
+            {!joining && <label>グループ名<input name="groupName" maxLength={100} required /></label>}
+            {!details.profile && <label>表示名<input name="displayName" autoComplete="nickname" maxLength={80} required /></label>}
+            {error && <p className="draft-error" role="alert">{error}</p>}
+            <button type="submit" disabled={pending}>
+              {pending ? (joining ? "参加中…" : "作成中…") : (joining ? "参加する" : "作成する")}
+            </button>
+          </form>
+        </>
       )}
       <button className="back-link" type="button" onClick={onCancel} disabled={pending}>
         {joining ? "招待を閉じる" : "← マイグループ"}

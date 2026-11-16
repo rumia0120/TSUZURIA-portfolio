@@ -2,7 +2,7 @@ begin;
 
 create extension if not exists pgtap with schema extensions;
 set local search_path to public, extensions;
-select plan(42);
+select plan(53);
 
 insert into auth.users (id, email)
 select ('10000000-0000-0000-0000-00000000000' || member)::uuid,
@@ -18,6 +18,11 @@ select ok(
   and not has_function_privilege('anon', 'public.accept_diary_invite(text, text)', 'execute'),
   'Anonymous callers cannot execute any group or invitation mutation'
 );
+select ok(
+  not has_function_privilege('anon', 'public.preview_diary_invite(text)', 'execute')
+  and not has_function_privilege('anon', 'diary_private.preview_diary_invite(text)', 'execute'),
+  'Anonymous callers cannot preview a group invitation'
+);
 
 set local role authenticated;
 set local "request.jwt.claims" = '{}';
@@ -25,6 +30,10 @@ set local "request.jwt.claim.sub" = '';
 select throws_ok(
   $$select public.create_diary_group('Test notebook', 'Owner')$$,
   '42501', null, 'Creating a group requires a user identity'
+);
+select throws_ok(
+  $$select public.preview_diary_invite(repeat('0', 64))$$,
+  '42501', null, 'Previewing an invitation requires a user identity'
 );
 
 set local "request.jwt.claim.sub" = '10000000-0000-0000-0000-000000000001';
@@ -109,6 +118,28 @@ select ok(not exists (
   select 1 from public.diary_groups where id = current_setting('test.diary_group')::uuid
 ), 'A signed-in user cannot see a group before joining');
 select throws_ok(
+  $$select public.preview_diary_invite('malformed')$$,
+  'P0002', null, 'Preview rejects malformed invitation tokens'
+);
+select throws_ok(
+  $$select public.preview_diary_invite(repeat('0', 64))$$,
+  'P0002', null, 'Preview rejects unknown invitation tokens'
+);
+select throws_ok(
+  $$select public.preview_diary_invite(current_setting('test.diary_invite_7'))$$,
+  'P0002', null, 'Preview rejects expired invitations'
+);
+select is(
+  public.preview_diary_invite(current_setting('test.diary_invite_2')),
+  'Test notebook',
+  'A signed-in invitee can preview the group name'
+);
+select ok(
+  not exists (select 1 from public.profiles where id = auth.uid())
+  and not exists (select 1 from public.diary_groups where id = current_setting('test.diary_group')::uuid),
+  'Preview creates neither a profile nor a membership'
+);
+select throws_ok(
   $$select public.create_diary_invite(current_setting('test.diary_group')::uuid)$$,
   '42501', null, 'An outsider cannot issue a link for the group'
 );
@@ -141,6 +172,10 @@ select throws_ok(
   $$select public.accept_diary_invite(current_setting('test.diary_invite_3'), 'Second writer')$$,
   '23505', null, 'A member cannot join again through a different link'
 );
+select throws_ok(
+  $$select public.preview_diary_invite(current_setting('test.diary_invite_3'))$$,
+  '23505', null, 'Preview tells an existing member that a different link is unnecessary'
+);
 
 reset role;
 update diary_private.diary_invites
@@ -148,6 +183,11 @@ set expires_at = now() - interval '1 minute'
 where token_hash = sha256(convert_to(current_setting('test.diary_invite_2'), 'UTF8'));
 
 set local role authenticated;
+select is(
+  public.preview_diary_invite(current_setting('test.diary_invite_2')),
+  'Test notebook',
+  'Preview preserves the original active member’s ability to retry acceptance'
+);
 select ok(
   public.accept_diary_invite(current_setting('test.diary_invite_2'), null)
     = current_setting('test.diary_group')::uuid,
@@ -155,6 +195,10 @@ select ok(
 );
 
 set local "request.jwt.claim.sub" = '10000000-0000-0000-0000-000000000003';
+select throws_ok(
+  $$select public.preview_diary_invite(current_setting('test.diary_invite_2'))$$,
+  'P0002', null, 'A spent invitation reveals no group name to a different account'
+);
 select throws_ok(
   $$select public.accept_diary_invite(current_setting('test.diary_invite_2'), null)$$,
   'P0002', null, 'A spent invitation cannot be reused by a different account'
@@ -237,6 +281,10 @@ select ok(
 );
 
 set local "request.jwt.claim.sub" = '10000000-0000-0000-0000-000000000006';
+select throws_ok(
+  $$select public.preview_diary_invite(current_setting('test.diary_invite_6'))$$,
+  '23514', null, 'Preview reveals no group name when the group is full'
+);
 select throws_ok(
   $$select public.accept_diary_invite(current_setting('test.diary_invite_6'), 'Sixth writer')$$,
   '23514', null, 'A group refuses a sixth active member'

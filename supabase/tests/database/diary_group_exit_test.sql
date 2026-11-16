@@ -2,7 +2,7 @@ begin;
 
 create extension if not exists pgtap with schema extensions;
 set local search_path to public, extensions;
-select plan(34);
+select plan(43);
 
 insert into auth.users (id, email)
 select ('31000000-0000-0000-0000-00000000000' || member)::uuid,
@@ -47,6 +47,12 @@ select ok(
   not has_function_privilege('anon', 'public.leave_diary_group(uuid, uuid)', 'execute'),
   'Anonymous callers cannot execute the exit operation'
 );
+select ok(
+  not has_function_privilege('anon', 'public.read_my_diary_groups()', 'execute')
+  and not has_function_privilege('anon', 'public.read_shared_diary_entries(uuid, uuid)', 'execute')
+  and not has_function_privilege('anon', 'diary_private.read_shared_diary_entries(uuid, uuid)', 'execute'),
+  'Anonymous callers cannot request group cards or shared entries with author labels'
+);
 
 set local role authenticated;
 set local "request.jwt.claims" = '{}';
@@ -54,6 +60,14 @@ set local "request.jwt.claim.sub" = '31000000-0000-0000-0000-000000000006';
 select throws_ok($$
   select public.leave_diary_group(current_setting('test.exit_group')::uuid, '40000000-0000-0000-0000-000000000003')
 $$, '42501', null, 'An outsider cannot end an existing membership');
+select ok(
+  not exists (select 1 from public.read_my_diary_groups())
+  and not exists (select 1 from public.read_shared_diary_entries(current_setting('test.exit_group')::uuid))
+  and not exists (
+    select 1 from public.read_shared_diary_entries(current_setting('test.exit_group')::uuid, '50000000-0000-0000-0000-000000000001')
+  ),
+  'An outsider cannot see a group card, list shared entries, or fetch shared entry detail'
+);
 
 set local "request.jwt.claim.sub" = '31000000-0000-0000-0000-000000000001';
 select throws_ok($$
@@ -63,6 +77,18 @@ select ok(
   exists (select 1 from public.diary_entries where id = '50000000-0000-0000-0000-000000000005')
   and not exists (select 1 from public.diary_entries where id = '50000000-0000-0000-0000-000000000006'),
   'Before leaving, a member’s shared entry is visible and someone else’s draft is private'
+);
+select ok((
+  select name = 'Exit test notebook' and writer_name = 'Writer 3' and not is_my_turn
+  from public.read_my_diary_groups() where id = current_setting('test.exit_group')::uuid
+), 'Group cards include the current writer when it is another member’s turn');
+select ok(
+  (select count(*) = 5 and count(distinct author_name) = 5
+    from public.read_shared_diary_entries(current_setting('test.exit_group')::uuid))
+  and (select author_name = 'Writer 3' and body = 'Shared diary 3' and shared_at is not null
+    from public.read_shared_diary_entries(current_setting('test.exit_group')::uuid, '50000000-0000-0000-0000-000000000003'))
+  and not exists (select 1 from public.profiles where display_name = 'Writer 3'),
+  'The list and detail name shared entry authors without opening up their profile rows'
 );
 
 set local "request.jwt.claim.sub" = '31000000-0000-0000-0000-000000000005';
@@ -81,12 +107,28 @@ select ok(
   and exists (select 1 from public.diary_entries where id = '50000000-0000-0000-0000-000000000001'),
   'Remaining members lose the departing author’s entry and retain active authors’ entries'
 );
+select ok(
+  not exists (
+    select 1 from public.read_shared_diary_entries(current_setting('test.exit_group')::uuid)
+    where author_name = 'Writer 5'
+  )
+  and not exists (
+    select 1 from public.read_shared_diary_entries(current_setting('test.exit_group')::uuid, '50000000-0000-0000-0000-000000000005')
+  ),
+  'Shared entry lists and detail hide departed authors and their entries'
+);
 select ok((
   select writer_name = 'Writer 3' and not is_my_turn
   from public.read_diary_turn(current_setting('test.exit_group')::uuid)
 ), 'A non-current member’s departure preserves the current turn');
 
 set local "request.jwt.claim.sub" = '31000000-0000-0000-0000-000000000003';
+select ok((
+  select writer_name = 'Writer 3' and is_my_turn
+  from public.read_my_diary_groups() where id = current_setting('test.exit_group')::uuid
+) and not exists (
+  select 1 from public.read_shared_diary_entries(current_setting('test.exit_group')::uuid, '50000000-0000-0000-0000-000000000006')
+), 'The card identifies the reader’s own turn and shared detail still excludes the reader’s own draft');
 select public.leave_diary_group(current_setting('test.exit_group')::uuid, '40000000-0000-0000-0000-000000000003');
 select throws_ok($$
   select public.save_diary_draft(current_setting('test.exit_group')::uuid, 'Write after leaving')
@@ -121,6 +163,10 @@ select ok((
   select writer_name is null and not is_my_turn
   from public.read_diary_turn(current_setting('test.exit_group')::uuid)
 ), 'With two members remaining, the app reports that the rotation is paused');
+select ok((
+  select writer_name is null and not is_my_turn
+  from public.read_my_diary_groups() where id = current_setting('test.exit_group')::uuid
+), 'Group cards show a paused rotation instead of showing a designated writer');
 select ok((
   select body = 'New diary from writer 4'
   from public.diary_entries where id = current_setting('test.exit_next_draft')::uuid
@@ -157,6 +203,9 @@ select ok((
 select ok(not exists (
   select 1 from public.diary_entries where group_id = current_setting('test.exit_group')::uuid
 ), 'A rejoining account cannot read its old draft or any entries shared before rejoining');
+select ok(not exists (
+  select 1 from public.read_shared_diary_entries(current_setting('test.exit_group')::uuid)
+), 'Author-labelled shared entries also start at the reader’s rejoin time');
 
 set local "request.jwt.claim.sub" = '31000000-0000-0000-0000-000000000004';
 select ok((
@@ -263,6 +312,12 @@ set local "request.jwt.claim.sub" = '31000000-0000-0000-0000-000000000004';
 select ok((
   select created_by = auth.uid() from public.diary_groups where id = current_setting('test.exit_legacy_group')::uuid
 ), 'An ownerless legacy group gives its earliest remaining member invitation ownership after an exit');
+select ok((
+  select count(*) = 2
+    and count(*) filter (where id = current_setting('test.exit_group')::uuid and writer_name = 'Writer 3' and not is_my_turn) = 1
+    and count(*) filter (where id = current_setting('test.exit_legacy_group')::uuid and writer_name is null and not is_my_turn) = 1
+  from public.read_my_diary_groups()
+), 'One request returns the independent turn status for all of a reader’s groups');
 
 reset role;
 select * from finish();

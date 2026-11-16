@@ -13,10 +13,11 @@ import { TurnEmailPreference } from "./turn-email-preference";
 type Selection = { groupId?: string; entryId?: string; writing?: boolean };
 type Turn = { writer_name: string | null; is_my_turn: boolean };
 type Group = { id: string; name: string; created_by: string | null };
-type Entry = { id: string; body: string; shared_at: string };
+type GroupCard = Pick<Group, "id" | "name"> & Turn;
+type Entry = { id: string; body: string; shared_at: string; author_name: string };
 type Draft = Pick<Entry, "id" | "body">;
 type View =
-  | { kind: "groups"; groups: Pick<Group, "id" | "name">[] }
+  | { kind: "groups"; groups: GroupCard[] }
   | { kind: "entries"; group: Group; entries: Entry[]; turn: Turn; membershipId: string }
   | { kind: "write"; group: Group; draft: Draft | null }
   | { kind: "entry"; group: Group; entry: Entry }
@@ -28,9 +29,15 @@ const date = new Intl.DateTimeFormat("ja-JP", {
 });
 const uuid = /^[0-9a-f]{8}-(?:[0-9a-f]{4}-){3}[0-9a-f]{12}$/i;
 
+function turnLabel(turn: Turn): string {
+  if (turn.is_my_turn) return "あなたの番です";
+  if (turn.writer_name) return `${turn.writer_name}さんの番です`;
+  return "メンバーの参加を待っています";
+}
+
 async function loadView(client: SupabaseClient, { groupId, entryId, writing }: Selection): Promise<View> {
   if (!groupId) {
-    const { data, error } = await client.from("diary_groups").select("id, name").order("name");
+    const { data, error } = await client.rpc("read_my_diary_groups").order("name");
     if (error) throw error;
     return { kind: "groups", groups: data };
   }
@@ -52,11 +59,12 @@ async function loadView(client: SupabaseClient, { groupId, entryId, writing }: S
     return { kind: "write", group: group.data, draft: data };
   }
 
-  // RLS checks the signed-in reader's membership and when the entry was shared.
-  const shared = client.from("diary_entries").select("id, body, shared_at")
-    .eq("group_id", groupId).not("shared_at", "is", null);
+  const shared = client.rpc("read_shared_diary_entries", {
+    target_group: groupId,
+    ...(entryId ? { target_entry: entryId } : {}),
+  });
   if (entryId) {
-    const { data, error } = await shared.eq("id", entryId).maybeSingle();
+    const { data, error } = await shared.maybeSingle<Entry>();
     if (error) throw error;
     return data ? { kind: "entry", group: group.data, entry: data } : { kind: "missing" };
   }
@@ -152,16 +160,24 @@ function Login({ client, inviteToken }: { client: SupabaseClient; inviteToken: s
   );
 }
 
-function DiaryDraft({ client, group, draft }: { client: SupabaseClient; group: Group; draft: Draft | null }) {
+type DiaryDraftProps = {
+  client: SupabaseClient;
+  group: Group;
+  draft: Draft | null;
+  onShared: (entryId: string) => void;
+};
+
+function DiaryDraft({ client, group, draft, onShared }: DiaryDraftProps) {
   const router = useRouter();
   const groupLink = `/?group=${group.id}`;
   const [body, setBody] = useState(draft?.body ?? "");
   const [savedDraft, setSavedDraft] = useState(draft);
-  const [status, setStatus] = useState<"idle" | "saving" | "saved" | "publishing">("idle");
+  const [status, setStatus] = useState<"idle" | "saving" | "publishing">("idle");
   const [errorMessage, setErrorMessage] = useState("");
   const requestPending = useRef(false);
   const editorActive = useRef(false);
   const busy = status === "saving" || status === "publishing";
+  const hasUnsavedChanges = body !== (savedDraft?.body ?? "");
   const canPublish = Boolean(savedDraft && savedDraft.body === body && body.trim());
   const saveFailure = "下書きを保存できませんでした。もう一度お試しください。";
 
@@ -172,7 +188,7 @@ function DiaryDraft({ client, group, draft }: { client: SupabaseClient; group: G
 
   async function saveDraft(event: FormEvent<HTMLFormElement>) {
     event.preventDefault();
-    if (requestPending.current || !body.trim()) return;
+    if (requestPending.current || !body.trim() || !hasUnsavedChanges) return;
 
     requestPending.current = true;
     setStatus("saving");
@@ -189,7 +205,7 @@ function DiaryDraft({ client, group, draft }: { client: SupabaseClient; group: G
         setStatus("idle");
       } else {
         setSavedDraft({ id: data, body });
-        setStatus("saved");
+        setStatus("idle");
       }
     } catch {
       setErrorMessage(saveFailure);
@@ -213,8 +229,10 @@ function DiaryDraft({ client, group, draft }: { client: SupabaseClient; group: G
         expected_body: savedDraft.body,
       });
       if (!error && typeof data === "string") {
-        // Changing the writing selection remounts DiaryContent and loads the latest entries and turn.
-        if (editorActive.current) router.replace(groupLink);
+        if (editorActive.current) {
+          onShared(data);
+          router.replace(groupLink);
+        }
         return;
       }
       switch (error?.code) {
@@ -241,6 +259,12 @@ function DiaryDraft({ client, group, draft }: { client: SupabaseClient; group: G
     setStatus("idle");
   }
 
+  const draftState = status === "saving"
+    ? "下書きを保存中…"
+    : hasUnsavedChanges
+      ? "未保存の変更があります。"
+      : savedDraft ? "下書き保存済み" : "";
+
   return (
     <>
       <Link className="back-link" href={groupLink}>← 日記一覧</Link>
@@ -263,9 +287,10 @@ function DiaryDraft({ client, group, draft }: { client: SupabaseClient; group: G
             }}
           />
           <p id="write-note" className="muted">下書きは自分だけが読めます。</p>
+          <p className="draft-state" role="status">{draftState}</p>
           <div className="draft-actions">
-            <button className="write-link draft-save" type="submit" disabled={busy || !body.trim()}>
-              {status === "saving" ? "保存中…" : "下書きを保存"}
+            <button className="write-link draft-save" type="submit" disabled={busy || !body.trim() || !hasUnsavedChanges}>
+              下書きを保存
             </button>
             <button
               className="write-link"
@@ -274,13 +299,12 @@ function DiaryDraft({ client, group, draft }: { client: SupabaseClient; group: G
               disabled={busy || !canPublish}
               onClick={publishDraft}
             >
-              {status === "publishing" ? "渡しています…" : "次の人に渡す"}
+              {status === "publishing" ? "共有しています…" : "グループに共有して渡す"}
             </button>
           </div>
           <p id="publish-note" className="muted publish-note">
-            {canPublish ? "保存した本文をグループに共有し、次の人に番を渡します。" : "本文を保存すると、次の人に渡せます。"}
+            {canPublish ? `本文を「${group.name}」のメンバーに共有し、次の人に番を渡します。` : "本文を保存すると、グループに共有して渡せます。"}
           </p>
-          <p className="muted" role="status">{status === "saved" ? "下書きを保存しました。" : ""}</p>
           {errorMessage && <p className="draft-error" role="alert">{errorMessage}</p>}
         </form>
       </article>
@@ -288,7 +312,23 @@ function DiaryDraft({ client, group, draft }: { client: SupabaseClient; group: G
   );
 }
 
-function DiaryContent({ client, user, groupId, entryId, writing }: Selection & { client: SupabaseClient; user: User }) {
+type DiaryContentProps = Selection & { client: SupabaseClient; user: User };
+
+function DiarySession(props: DiaryContentProps) {
+  const [sharedEntryId, setSharedEntryId] = useState<string>();
+  return (
+    <DiaryContent
+      key={JSON.stringify([props.entryId, props.writing])}
+      {...props}
+      sharedEntryId={sharedEntryId}
+      onShared={setSharedEntryId}
+    />
+  );
+}
+
+function DiaryContent({
+  client, user, groupId, entryId, writing, sharedEntryId, onShared,
+}: DiaryContentProps & { sharedEntryId?: string; onShared: (entryId: string) => void }) {
   const router = useRouter();
   const [creatingGroup, setCreatingGroup] = useState(false);
   const [leftGroup, setLeftGroup] = useState(false);
@@ -325,7 +365,10 @@ function DiaryContent({ client, user, groupId, entryId, writing }: Selection & {
         {view.groups.map((group) => (
           <Link className="group-card" key={group.id} href={`/?group=${group.id}`}>
             <span className="notebook-icon" aria-hidden="true" />
-            <strong className="row-copy">{group.name}</strong>
+            <span className="row-copy">
+              <strong>{group.name}</strong>
+              <small className={group.is_my_turn ? "my-turn-label" : undefined}>{turnLabel(group)}</small>
+            </span>
             <span className="chevron" aria-hidden="true">›</span>
           </Link>
         ))}
@@ -336,16 +379,19 @@ function DiaryContent({ client, user, groupId, entryId, writing }: Selection & {
 
   const groupLink = `/?group=${view.group.id}`;
   if (view.kind === "write") {
-    return <DiaryDraft client={client} group={view.group} draft={view.draft} />;
+    return <DiaryDraft client={client} group={view.group} draft={view.draft} onShared={onShared} />;
   }
   if (view.kind === "entries") return (
     <>
       <Link className="back-link" href="/">← マイグループ</Link>
       <h1>{view.group.name}</h1>
       <section className="turn-summary" aria-label="日記の順番">
-        <p>{view.turn.is_my_turn ? "あなたの番です" : view.turn.writer_name ? `今は${view.turn.writer_name}さんの番です` : "メンバーの参加を待っています"}</p>
+        <p className={view.turn.is_my_turn ? "my-turn-label" : undefined}>{turnLabel(view.turn)}</p>
         {view.turn.is_my_turn && <Link className="write-link" href={`${groupLink}&write=1`}>日記を書く</Link>}
       </section>
+      {sharedEntryId && view.entries.some((entry) => entry.id === sharedEntryId) && (
+        <p className="share-status" role="status">日記を共有しました。</p>
+      )}
       {!view.turn.is_my_turn && !view.turn.writer_name && (
         <div className="group-waiting">
           <p className="muted">3人そろうと日記を回せます。</p>
@@ -361,7 +407,7 @@ function DiaryContent({ client, user, groupId, entryId, writing }: Selection & {
         {view.entries.map((entry) => (
           <li key={entry.id}>
             <Link className="entry-row" href={`${groupLink}&entry=${entry.id}`}>
-              <time className="entry-meta" dateTime={entry.shared_at}>{date.format(new Date(entry.shared_at))}</time>
+              <span className="entry-meta"><time dateTime={entry.shared_at}>{date.format(new Date(entry.shared_at))}</time> · {entry.author_name}</span>
               <span className="entry-excerpt">{entry.body}</span>
               <span className="chevron" aria-hidden="true">›</span>
             </Link>
@@ -388,6 +434,7 @@ function DiaryContent({ client, user, groupId, entryId, writing }: Selection & {
       <article className="paper">
         <p className="paper-label">{view.group.name}</p>
         <h1><time dateTime={view.entry.shared_at}>{date.format(new Date(view.entry.shared_at))}</time>の日記</h1>
+        <p className="entry-meta">{view.entry.author_name}</p>
         <div className="paper-body reader-body">{view.entry.body}</div>
         <DiaryReactions client={client} entryId={view.entry.id} userId={user.id} />
       </article>
@@ -436,7 +483,7 @@ export default function DiaryReader({ groupId, entryId, writing }: Selection) {
         {logoutError && <p role="alert">ログアウトできませんでした。もう一度お試しください。</p>}
         {inviteToken !== null
           ? <GroupMembershipForm key={JSON.stringify([user.id, inviteToken])} client={client} user={user} inviteToken={inviteToken} onCancel={clearInviteLink} />
-          : <DiaryContent key={JSON.stringify([user.id, groupId, entryId, writing])} client={client} user={user} groupId={groupId} entryId={entryId} writing={writing} />}
+          : <DiarySession key={JSON.stringify([user.id, groupId])} client={client} user={user} groupId={groupId} entryId={entryId} writing={writing} />}
       </main>
     </div>
   );
