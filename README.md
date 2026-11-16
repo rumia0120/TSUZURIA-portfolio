@@ -1,6 +1,8 @@
 # TSUZURIA
 
-友達と一冊の日記を順番に回す交換日記アプリ。プロダクトの方針は [docs/concept.md](docs/concept.md) を参照してください。
+友だち3〜5人で一冊の日記を順番に回す、開発中の交換日記 Web アプリです。
+
+[企画](docs/concept.md) · [設計判断](docs/decisions.md) · [実装状況と検証計画](docs/roadmap.md)
 
 ## ローカル開発
 
